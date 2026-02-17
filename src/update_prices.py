@@ -33,26 +33,43 @@ def fred_series(series_id: str):
     return out
 
 
-def fetch_tsp_latest():
-    html = http_get('https://www.tspdatacenter.com/daily-share-prices/?tsp_month=2&tsp_year=2026')
-    # grab first date/table block shown on page (latest)
-    m = re.search(r'<h3>([^<]+)</h3>\s*<table[^>]*>(.*?)</table>', html, re.S)
-    if not m:
-        raise RuntimeError('Could not parse TSP latest block')
-    human_date = m.group(1).strip()
-    table = m.group(2)
-    dt = datetime.strptime(human_date, '%A, %B %d, %Y').date().isoformat()
+def _month_year_candidates(now: datetime):
+    y, m = now.year, now.month
+    prev_y, prev_m = (y - 1, 12) if m == 1 else (y, m - 1)
+    return [(m, y), (prev_m, prev_y)]
 
-    pairs = re.findall(r'<b>([^<]+)</b>\s*&nbsp;\s*</td>\s*<td>\s*\$([0-9.]+)', table, re.S)
-    data = {name.strip(): float(val) for name, val in pairs}
-    funds = {
-        'C': data.get('C Fund'),
-        'S': data.get('S Fund'),
-        'I': data.get('I Fund'),
-        'G': data.get('G Fund'),
-        'F': data.get('F Fund'),
-    }
-    return dt, funds
+
+def fetch_tsp_latest(now: datetime):
+    """Fetch latest TSP C/S/I/G/F prices from tspdatacenter.
+    Tries current month first, then previous month.
+    """
+    last_err = None
+    for month, year in _month_year_candidates(now):
+        try:
+            html = http_get(
+                f'https://www.tspdatacenter.com/daily-share-prices/?tsp_month={month}&tsp_year={year}'
+            )
+            m = re.search(r'<h3>([^<]+)</h3>\s*<table[^>]*>(.*?)</table>', html, re.S)
+            if not m:
+                raise RuntimeError('Could not parse latest TSP table block')
+
+            human_date = m.group(1).strip()
+            table = m.group(2)
+            trade_date = datetime.strptime(human_date, '%A, %B %d, %Y').date().isoformat()
+
+            pairs = re.findall(r'<b>([^<]+)</b>\s*&nbsp;\s*</td>\s*<td>\s*\$([0-9.]+)', table, re.S)
+            data = {name.strip(): float(val) for name, val in pairs}
+            funds = {
+                'C': data.get('C Fund'),
+                'S': data.get('S Fund'),
+                'I': data.get('I Fund'),
+                'G': data.get('G Fund'),
+                'F': data.get('F Fund'),
+            }
+            return trade_date, funds
+        except Exception as e:
+            last_err = e
+    raise RuntimeError(f'Failed to fetch TSP latest prices: {last_err}')
 
 
 def fetch_fed_for_date(d: str):
@@ -66,12 +83,13 @@ def fetch_fed_for_date(d: str):
     }
 
 
-def build_payload():
-    tsp_date, tsp_funds = fetch_tsp_latest()
-    fed = fetch_fed_for_date(tsp_date)
+def build_payload(now: datetime):
+    trade_date, tsp_funds = fetch_tsp_latest(now)
+    fed = fetch_fed_for_date(trade_date)
     return {
-        'as_of_utc': datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        'trade_date': tsp_date,
+        'schema_version': 'v1',
+        'as_of_utc': now.replace(microsecond=0).isoformat(),
+        'trade_date': trade_date,
         'fed': {
             'effective_fed_funds_rate': fed['effective_fed_funds_rate'],
             'target_lower': fed['target_lower'],
@@ -87,20 +105,24 @@ def build_payload():
             'source': 'https://www.tspdatacenter.com/daily-share-prices/',
             'note': 'Unofficial mirror used because tsp.gov may block direct server access.',
         },
+        'meta': {
+            'producer': 'moose-core',
+        },
     }
 
 
 def main():
+    now = datetime.now(timezone.utc)
+
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     SNAP_DIR.mkdir(parents=True, exist_ok=True)
 
-    payload = build_payload()
+    payload = build_payload(now)
     trade_date = payload['trade_date']
 
     last = STATE_FILE.read_text().strip() if STATE_FILE.exists() else ''
     changed = trade_date != last
 
-    # always refresh latest.json
     LATEST_FILE.write_text(json.dumps(payload, indent=2) + '\n')
 
     if changed:
