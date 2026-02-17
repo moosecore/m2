@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://moose-core/schemas/v1/market_snapshot.schema.json",
+  "title": "Market Snapshot v1",
+  "type": "object",
+  "required": ["schema_version", "as_of_utc", "trade_date", "fed", "tsp"],
+  "properties": {
+    "schema_version": { "const": "v1" },
+    "as_of_utc": { "type": "string" },
+    "trade_date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+    "fed": {
+      "type": "object",
+      "required": ["effective_fed_funds_rate", "target_lower", "target_upper"],
+      "properties": {
+        "effective_fed_funds_rate": { "type": ["number", "null"] },
+        "target_lower": { "type": ["number", "null"] },
+        "target_upper": { "type": ["number", "null"] },
+        "source": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "tsp": {
+      "type": "object",
+      "required": ["funds"],
+      "properties": {
+        "funds": {
+          "type": "object",
+          "required": ["C", "S", "I", "G", "F"],
+          "properties": {
+            "C": { "type": ["number", "null"] },
+            "S": { "type": ["number", "null"] },
+            "I": { "type": ["number", "null"] },
+            "G": { "type": ["number", "null"] },
+            "F": { "type": ["number", "null"] }
+          }
+        },
+        "source": { "type": "string" },
+        "note": { "type": "string" }
+      }
+    },
+    "meta": { "type": "object" }
+  }
+}

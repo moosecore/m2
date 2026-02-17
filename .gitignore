@@ -1,0 +1,23 @@
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+*.token
+
+# Runtime/state (do not commit)
+/data/
+/logs/
+/state/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
