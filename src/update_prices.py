@@ -3,7 +3,9 @@ import csv
 import io
 import json
 import re
+import time
 import urllib.request
+from urllib.error import URLError
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,10 +18,19 @@ LATEST_FILE = DATA_DIR / 'latest.json'
 UA = {'User-Agent': 'Mozilla/5.0'}
 
 
-def http_get(url: str) -> str:
-    req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return r.read().decode('utf-8', 'ignore')
+def http_get(url: str, retries: int = 4, timeout: int = 30, backoff_base: float = 1.8) -> str:
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            req = urllib.request.Request(url, headers=UA)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read().decode('utf-8', 'ignore')
+        except (TimeoutError, URLError, OSError) as e:
+            last_err = e
+            if attempt < retries:
+                sleep_s = backoff_base ** (attempt - 1)
+                time.sleep(sleep_s)
+    raise RuntimeError(f'HTTP fetch failed for {url}: {last_err}')
 
 
 def fred_series(series_id: str):
