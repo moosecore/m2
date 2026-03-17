@@ -15,6 +15,7 @@ DATA_DIR = BASE / 'data'
 SNAP_DIR = DATA_DIR / 'snapshots'
 STATE_FILE = DATA_DIR / 'last_published_date.txt'
 LATEST_FILE = DATA_DIR / 'latest.json'
+HEALTH_FILE = DATA_DIR / 'pipeline_health.json'
 
 # Reasonable limits to avoid long retry loops
 HTTP_RETRIES = 3
@@ -167,10 +168,28 @@ def build_payload(now: datetime):
             'source': 'https://www.tspdatacenter.com/daily-share-prices/',
             'note': 'Unofficial mirror used because tsp.gov may block direct server access.',
         },
+        'alerts': [],
         'meta': {
             'producer': 'moose-core',
         },
     }
+
+
+def _read_health_state():
+    if not HEALTH_FILE.exists():
+        return {'consecutive_cached_fed_runs': 0, 'last_updated_utc': None}
+    try:
+        data = json.loads(HEALTH_FILE.read_text())
+        return {
+            'consecutive_cached_fed_runs': int(data.get('consecutive_cached_fed_runs', 0)),
+            'last_updated_utc': data.get('last_updated_utc'),
+        }
+    except Exception:
+        return {'consecutive_cached_fed_runs': 0, 'last_updated_utc': None}
+
+
+def _write_health_state(state):
+    HEALTH_FILE.write_text(json.dumps(state, indent=2) + '\n')
 
 
 def main():
@@ -182,10 +201,33 @@ def main():
     payload = build_payload(now)
     trade_date = payload['trade_date']
 
+    health = _read_health_state()
+    if payload.get('fed', {}).get('source_mode', 'live').startswith('cached_fallback'):
+        health['consecutive_cached_fed_runs'] = int(health.get('consecutive_cached_fed_runs', 0)) + 1
+    else:
+        health['consecutive_cached_fed_runs'] = 0
+
+    health['last_updated_utc'] = now.replace(microsecond=0).isoformat()
+
+    payload.setdefault('meta', {})['pipeline_health'] = {
+        'consecutive_cached_fed_runs': health['consecutive_cached_fed_runs'],
+    }
+
+    if health['consecutive_cached_fed_runs'] > 0:
+        payload.setdefault('alerts', []).append(
+            f"FED data used cached fallback ({health['consecutive_cached_fed_runs']} consecutive run(s))"
+        )
+
+    if health['consecutive_cached_fed_runs'] >= 3:
+        payload.setdefault('alerts', []).append(
+            'ALERT: FED cached fallback used 3+ consecutive runs — investigate upstream data source'
+        )
+
     last = STATE_FILE.read_text().strip() if STATE_FILE.exists() else ''
     changed = trade_date != last
 
     LATEST_FILE.write_text(json.dumps(payload, indent=2) + '\n')
+    _write_health_state(health)
 
     if changed:
         snap = SNAP_DIR / f'{trade_date}.json'
@@ -194,6 +236,9 @@ def main():
         print(f'NEW {trade_date} -> {snap}')
     else:
         print(f'UNCHANGED {trade_date}')
+
+    if health['consecutive_cached_fed_runs'] >= 3:
+        print('ALERT cached_fed_runs>=3')
 
 
 if __name__ == '__main__':

@@ -60,6 +60,41 @@ class TestUpdatePrices(unittest.TestCase):
             self.assertEqual(payload['tsp']['funds']['C'], 1)
             self.assertEqual(payload['fed']['target_upper'], 4.0)
 
+    def test_health_state_cached_counter_and_alert_threshold(self):
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            snap_dir = data_dir / 'snapshots'
+            snap_dir.mkdir(parents=True, exist_ok=True)
+
+            latest = data_dir / 'latest.json'
+            state_file = data_dir / 'last_published_date.txt'
+            health_file = data_dir / 'pipeline_health.json'
+
+            cached_fed = {
+                'effective_fed_funds_rate': 3.9,
+                'target_lower': 3.75,
+                'target_upper': 4.0,
+                'source_mode': 'cached_fallback (test)'
+            }
+
+            with patch.object(up, 'DATA_DIR', data_dir), \
+                 patch.object(up, 'SNAP_DIR', snap_dir), \
+                 patch.object(up, 'LATEST_FILE', latest), \
+                 patch.object(up, 'STATE_FILE', state_file), \
+                 patch.object(up, 'HEALTH_FILE', health_file), \
+                 patch.object(up, 'fetch_tsp_latest', return_value=('2026-03-16', {'C': 1, 'S': 2, 'I': 3, 'G': 4, 'F': 5})), \
+                 patch.object(up, 'fetch_fed_for_date', return_value=cached_fed):
+
+                up.main()
+                up.main()
+                up.main()
+
+            payload = json.loads(latest.read_text())
+            health = json.loads(health_file.read_text())
+            self.assertEqual(health['consecutive_cached_fed_runs'], 3)
+            self.assertIn('alerts', payload)
+            self.assertTrue(any('3+ consecutive runs' in a for a in payload['alerts']))
+
 
 if __name__ == '__main__':
     unittest.main()
