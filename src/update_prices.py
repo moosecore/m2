@@ -3,6 +3,7 @@ import csv
 import io
 import json
 import re
+import subprocess
 import time
 import urllib.request
 from urllib.error import URLError
@@ -15,10 +16,28 @@ SNAP_DIR = DATA_DIR / 'snapshots'
 STATE_FILE = DATA_DIR / 'last_published_date.txt'
 LATEST_FILE = DATA_DIR / 'latest.json'
 
+# Reasonable limits to avoid long retry loops
+HTTP_RETRIES = 3
+HTTP_TIMEOUT = 20
+BACKOFF_BASE = 2.0
+
 UA = {'User-Agent': 'Mozilla/5.0'}
 
 
-def http_get(url: str, retries: int = 4, timeout: int = 30, backoff_base: float = 1.8) -> str:
+def _http_get_with_curl(url: str, timeout: int = HTTP_TIMEOUT) -> str:
+    # Fallback transport for hosts that intermittently time out via urllib from this VPS.
+    proc = subprocess.run(
+        ["curl", "-A", "Mozilla/5.0", "-fsSL", "--max-time", str(timeout), url],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode == 0:
+        return proc.stdout
+    raise RuntimeError(f"curl fetch failed for {url}: rc={proc.returncode} stderr={proc.stderr.strip()}")
+
+
+def http_get(url: str, retries: int = HTTP_RETRIES, timeout: int = HTTP_TIMEOUT, backoff_base: float = BACKOFF_BASE) -> str:
     last_err = None
     for attempt in range(1, retries + 1):
         try:
@@ -27,6 +46,12 @@ def http_get(url: str, retries: int = 4, timeout: int = 30, backoff_base: float 
                 return r.read().decode('utf-8', 'ignore')
         except (TimeoutError, URLError, OSError) as e:
             last_err = e
+            # On final urllib attempt, try curl fallback once before failing.
+            if attempt == retries:
+                try:
+                    return _http_get_with_curl(url, timeout=timeout)
+                except Exception as curl_e:
+                    last_err = curl_e
             if attempt < retries:
                 sleep_s = backoff_base ** (attempt - 1)
                 time.sleep(sleep_s)
@@ -83,15 +108,40 @@ def fetch_tsp_latest(now: datetime):
     raise RuntimeError(f'Failed to fetch TSP latest prices: {last_err}')
 
 
+def _cached_fed_fallback():
+    if not LATEST_FILE.exists():
+        return None
+    try:
+        latest = json.loads(LATEST_FILE.read_text())
+        fed = latest.get('fed', {})
+        if all(k in fed for k in ('effective_fed_funds_rate', 'target_lower', 'target_upper')):
+            return {
+                'effective_fed_funds_rate': fed.get('effective_fed_funds_rate'),
+                'target_lower': fed.get('target_lower'),
+                'target_upper': fed.get('target_upper'),
+            }
+    except Exception:
+        return None
+    return None
+
+
 def fetch_fed_for_date(d: str):
-    dff = fred_series('DFF')
-    low = fred_series('DFEDTARL')
-    high = fred_series('DFEDTARU')
-    return {
-        'effective_fed_funds_rate': dff.get(d),
-        'target_lower': low.get(d),
-        'target_upper': high.get(d),
-    }
+    try:
+        dff = fred_series('DFF')
+        low = fred_series('DFEDTARL')
+        high = fred_series('DFEDTARU')
+        return {
+            'effective_fed_funds_rate': dff.get(d),
+            'target_lower': low.get(d),
+            'target_upper': high.get(d),
+            'source_mode': 'live',
+        }
+    except Exception as e:
+        fallback = _cached_fed_fallback()
+        if fallback is None:
+            raise
+        fallback['source_mode'] = f'cached_fallback ({e})'
+        return fallback
 
 
 def build_payload(now: datetime):
@@ -110,6 +160,7 @@ def build_payload(now: datetime):
                 'https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARL',
                 'https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARU',
             ],
+            'source_mode': fed.get('source_mode', 'live'),
         },
         'tsp': {
             'funds': tsp_funds,
